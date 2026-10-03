@@ -32,6 +32,10 @@ window.__ModuleLoader__.load({
     const ROUTE_PENDING = 'api/handoff/pending';
     const ROUTE_ACK = 'api/handoff/ack';
     const ROUTE_DRAFT_REPORT = 'api/handoff/draft-report';
+    /** AI 请求交接的"收到回执"（替用户打完「换会话」后回去清标志）。 */
+    const ROUTE_FIRE_ACK = 'api/handoff/fire-ack';
+    /** 轮询"AI 有没有请求交接"的间隔：5 秒。 */
+    const FIRE_POLL_MS = 5_000;
     /** 草稿上报间隔：5 秒上报一次，够快也够省。 */
     const DRAFT_REPORT_MS = 5_000;
     /** 超 2 小时的旧待接不追（修"错过窗口就永远不切"那个 bug 时一并加的）。 */
@@ -63,6 +67,9 @@ window.__ModuleLoader__.load({
      *   现在挪到这里，跟 timer/noticeTimer 并列，声明的位置和清理的位置是一个作用域了。
      */
     let draftTimer = null;
+    /** 「AI 主动请求交接」的轮询器 + 防重复发送的时刻。 */
+    let fireTimer = null;
+    let fireSentAt = 0;
 
     /**
      * 把**自动交接包那条提示**从界面上藏掉（她 2026-09-27 16:5x：「能不能隐藏让我看不到」）。
@@ -235,6 +242,24 @@ window.__ModuleLoader__.load({
       }
     }
 
+    /**
+     * 「AI 主动请求交接」（2026-10-03 加，给「收尾换会话」用）：
+     * AI 做完前四步后调 `POST /api/handoff/fire` 举手；这里轮询看到标志就**替用户打一条
+     * 纯文本「换会话」**（复用 `sendQuickWord`）——于是走的还是**现有那条触发路径**，
+     * 交接核心一行没动。打完回执清标志，并用 `fireSentAt` 防重复。
+     */
+    async function handleFireRequest(ctx) {
+      const response = await fetch(ROUTE_PENDING, { headers: { accept: 'application/json' } });
+      if (!response.ok) return;
+      const body = await response.json().catch(() => null);
+      if (!body?.fire) return;
+      if (fireSentAt && Date.now() - fireSentAt < 60_000) return;
+      fireSentAt = Date.now();
+      sendQuickWord(ctx, { sessionId: body.sessionId ?? '' }, '换会话');
+      await fetch(ROUTE_FIRE_ACK, { method: 'POST' }).catch(() => {});
+      log('收到 AI 交接请求（fire）→ 已替用户发「换会话」');
+    }
+
     /* ── 指令菜单里的「换会话」（2026-09-28 从 dsh-session-switch 的客户端半搬来的） ──────
      * 她那天说「换会话就塞到换会话的插件里」；两个插件合并后，这一条跟着搬进这里。
      * 点一下 = 发一条**纯文本**「换会话」——Host 半边是按用户消息里的**整行关键词**认触发词的
@@ -377,6 +402,8 @@ window.__ModuleLoader__.load({
           timer = setInterval(() => { tick(ctx).catch(() => {}); }, POLL_MS);
           // 草稿上报：每 5 秒检查并上报一次输入框草稿状态
           draftTimer = setInterval(() => { reportDraft(ctx).catch(() => {}); }, DRAFT_REPORT_MS);
+          // AI 请求交接：轮询看到 fire 就替用户打一条「换会话」（给「收尾换会话」用）
+          fireTimer = setInterval(() => { handleFireRequest(ctx).catch(() => {}); }, FIRE_POLL_MS);
           // 顺手把那条又长又刷屏的自动交接包提示从界面上藏掉（她要求："让我看不到"）。
           hideHandoffNotice();
           noticeTimer = setInterval(hideHandoffNotice, NOTICE_SCAN_MS);
@@ -390,9 +417,11 @@ window.__ModuleLoader__.load({
             if (timer !== null) clearInterval(timer);
             if (noticeTimer !== null) clearInterval(noticeTimer);
             if (draftTimer !== null) clearInterval(draftTimer);
+            if (fireTimer !== null) clearInterval(fireTimer);
             timer = null;
             noticeTimer = null;
             draftTimer = null;
+            fireTimer = null;
           } catch { /* 清理失败不该影响卸载 */ }
         };
       },

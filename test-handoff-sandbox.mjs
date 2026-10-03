@@ -382,9 +382,9 @@ export async function run(options = {}) {
     check('指纹标记：三份文件都带同一份指纹', hasFlag(afterDiary, real.fingerprint) && hasFlag(afterState, real.fingerprint) && hasFlag(afterGrowth, real.fingerprint), true);
     check('指纹标记：日记用的是 entryFlag 形状', hasFlag(afterDiary, entryFlag(real.fingerprint)), true);
 
-    /* 17 · Host 半边的接线（用假 ctx 走一遍 apply + 六条路由） */
+    /* 17 · Host 半边的接线（用假 ctx 走一遍 apply + 八条路由） */
     say(`17. 路由注册：${host ? [...host.routes.keys()].join('  ') : '（Host 半边没加载）'}`);
-    check('Host：六条路由都注册上了', host ? host.routes.size === 6 : false, true);
+    check('Host：八条路由都注册上了', host ? host.routes.size === 8 : false, true);
     check('Host：requestBody 全是 buffered（写别的会静默失败）', host ? [...host.routes.values()].every((r) => r.requestBody === 'buffered') : false, true);
     check('Host：agent/pre-step 监听挂上了（waterfall 必须 return next）', host ? host.listeners.has('agent/pre-step') : false, true);
     const healthBody = host ? await (await host.routes.get('/api/handoff/health').fetch(new Request('http://sandbox/api/handoff/health'))).json() : {};

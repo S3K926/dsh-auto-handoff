@@ -124,6 +124,11 @@ const ROUTE_ACK = '/api/handoff/ack';
 const ROUTE_HEALTH = '/api/handoff/health';
 const ROUTE_STATUS = '/api/handoff/status';
 const ROUTE_DRAFT_REPORT = '/api/handoff/draft-report';
+/** 「AI 主动请求交接」（2026-10-03 加，给「收尾换会话」用）：AI 调它 = 举手说"我要交接"；
+ *  客户端轮询 `/pending` 看到标志后，替用户打一条「换会话」→ 走**现有**那条触发路径。 */
+const ROUTE_FIRE = '/api/handoff/fire';
+/** 客户端替用户打完「换会话」后回来清标志（免得重复打）。 */
+const ROUTE_FIRE_ACK = '/api/handoff/fire-ack';
 /** 草稿上报有效期：30 秒内没上报就当作无草稿（避免客户端挂了还卡着不交接）。 */
 const DRAFT_REPORT_TTL_MS = 30_000;
 /** HTTP 响应的 JSON 头（统一一处，免得两边不一致）。 */
@@ -567,7 +572,7 @@ export function apply(ctx, config = {}) {
   return { pending: () => pluginState };
 }
 
-/** 五条路由各注册一次（不靠 pathname 分派）；`requestBody` 只能是 buffered。 */
+/** 八条路由各注册一次（不靠 pathname 分派）；`requestBody` 只能是 buffered。 */
 function registerRoutes(ctx) {
   const routes = [
     [ROUTE_PENDING, ['GET'], () => Response.json(pendingView(), { headers: JSON_HEADERS })],
@@ -576,6 +581,8 @@ function registerRoutes(ctx) {
     [ROUTE_HEALTH, ['GET'], () => Response.json(health(), { headers: JSON_HEADERS })],
     [ROUTE_STATUS, ['GET'], () => Response.json(statusView(), { headers: JSON_HEADERS })],
     [ROUTE_DRAFT_REPORT, ['POST'], (request) => handleDraftReport(request)],
+    [ROUTE_FIRE, ['POST'], () => handleFire()],
+    [ROUTE_FIRE_ACK, ['POST'], () => handleFireAck()],
   ];
   for (const [path, methods, handler] of routes) {
     ctx.effect(() => ctx.connection.fetch.register({
@@ -620,6 +627,20 @@ async function handleDraftReport(request) {
     report(`草稿上报失败：${error instanceof Error ? error.message : String(error)}`);
     return Response.json({ ok: false, error: error instanceof Error ? error.message : String(error) }, { status: 500, headers: JSON_HEADERS });
   }
+}
+
+/** 「AI 主动请求交接」：设标志，等客户端轮询看到后替用户打「换会话」。 */
+async function handleFire() {
+  pluginState.fireRequested = { at: Date.now() };
+  report('收到 AI 交接请求（fire）：等客户端替用户打「换会话」');
+  return Response.json({ ok: true, at: pluginState.fireRequested.at }, { headers: JSON_HEADERS });
+}
+
+/** 客户端打完「换会话」回来清标志。 */
+async function handleFireAck() {
+  pluginState.fireRequested = null;
+  report('AI 交接请求已被客户端取走（fire-ack）');
+  return Response.json({ ok: true }, { headers: JSON_HEADERS });
 }
 
 /** 自检口：不碰档案，只回答"配置与管道活着吗"。 */

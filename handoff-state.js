@@ -32,6 +32,10 @@ export const pluginState = {
   // 真交接关键词"待命"标记（2026-09-27 16:3x 加）：跟 drillPending 同一个道理，
   // 但**只在实时抓取那条路**设，且只消费一次。打一次真交接关键词（现口径：`换会话`）= 立刻写真档案 + 切会话。
   livePending: null,
+  // 「AI 主动请求交接」（2026-10-03 加，给「收尾换会话」用）：AI 做完前四步后调
+  // `POST /api/handoff/fire` 设这个标记，客户端轮询 `/pending` 看到它 → 替用户打一条
+  // 「换会话」→ 于是走**现有那条触发路径**（交接核心一行没动）。有效期 60 秒，见 pendingView。
+  fireRequested: null,
   // 演练去重（2026-09-27 16:1x 修 bug 时加的）：匹配到的**那条用户消息**的指纹。
   // 为什么必须有 —— `isDrill` 读的是整个快照，"最近三条用户消息"里只要还挂着 `#交接演练`，
   // **每一次 pre-step 都会重跑一遍演练**（真机 16:05-16:06：一分钟内跑了 4 次，
@@ -45,8 +49,13 @@ export const pluginState = {
 
 /** 待接记录（内存版）：客户端轮询 `/pending` 拿的就是它。 */
 export function pendingView() {
-  if (!pluginState.pending) return { ok: true, pending: null, note: '暂无待交接' };
-  return { ok: true, pending: pluginState.pending };
+  // 「AI 主动请求交接」的标志：60 秒内有效（过期当没有 —— 免得客户端挂了还一直切）。
+  // 一并带上 sessionId：客户端要"替用户打一条「换会话」"，得知道在哪个会话里打。
+  const fireAt = Number(pluginState.fireRequested?.at ?? 0);
+  const fire = fireAt > 0 && Date.now() - fireAt < 60_000;
+  const sessionId = pluginState.sessionId ?? '';
+  if (!pluginState.pending) return { ok: true, pending: null, fire, sessionId, note: '暂无待交接' };
+  return { ok: true, pending: pluginState.pending, fire, sessionId };
 }
 
 /** 交接完成后的待接落盘 —— 客户端据此决定"切到哪个会话"。 */
