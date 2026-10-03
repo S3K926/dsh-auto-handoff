@@ -123,6 +123,9 @@ const ROUTE_TAKE = '/api/handoff/take';
 const ROUTE_ACK = '/api/handoff/ack';
 const ROUTE_HEALTH = '/api/handoff/health';
 const ROUTE_STATUS = '/api/handoff/status';
+const ROUTE_DRAFT_REPORT = '/api/handoff/draft-report';
+/** 草稿上报有效期：30 秒内没上报就当作无草稿（避免客户端挂了还卡着不交接）。 */
+const DRAFT_REPORT_TTL_MS = 30_000;
 /** HTTP 响应的 JSON 头（统一一处，免得两边不一致）。 */
 const JSON_HEADERS = { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' };
 /** 诊断日志：放系统临时目录，**不动用户的 profile，也不写任何活环境目录**。 */
@@ -152,6 +155,12 @@ function decide(ctx, session, turn, config) {
   //    160 个会话可以各自"合规地"触发一次 —— 所以这里必须有跨会话的全局冷却。
   const global = globalCooldown();
   if (!global.ok) return { fire: false, ratio: measured, reason: `${detail} → 不触发（${global.reason}）` };
+  // 交接前检查客户端是否有未发送草稿（上报在 DRAFT_REPORT_TTL_MS 内视为有效）
+  const draft = pluginState.clientDraft ?? { hasDraft: false, at: 0 };
+  const draftRecent = draft.hasDraft && (Date.now() - draft.at) < DRAFT_REPORT_TTL_MS;
+  if (draftRecent) {
+    return { fire: false, ratio: measured, reason: `${detail} → 不触发（客户端有未发送草稿，等下一轮）` };
+  }
   return { fire: true, ratio: measured, reason: `${detail} → 触发交接（${global.reason}）` };
 }
 
@@ -566,6 +575,7 @@ function registerRoutes(ctx) {
     [ROUTE_ACK, ['POST'], (request) => handleAck(request)],
     [ROUTE_HEALTH, ['GET'], () => Response.json(health(), { headers: JSON_HEADERS })],
     [ROUTE_STATUS, ['GET'], () => Response.json(statusView(), { headers: JSON_HEADERS })],
+    [ROUTE_DRAFT_REPORT, ['POST'], (request) => handleDraftReport(request)],
   ];
   for (const [path, methods, handler] of routes) {
     ctx.effect(() => ctx.connection.fetch.register({
@@ -596,6 +606,20 @@ async function handleAck(request) {
   pluginState.pending.handledBy = String(body?.sessionId ?? '');
   report(`客户端回报已切到 ${pluginState.pending.handledBy || '（未知会话）'}（sourceSession=${pluginState.pending.sourceSession}）`);
   return Response.json({ ok: true, at: pluginState.pending.at }, { headers: JSON_HEADERS });
+}
+
+/** 接收客户端草稿上报：{ hasDraft: boolean }。 */
+async function handleDraftReport(request) {
+  try {
+    const body = await request.json().catch(() => ({}));
+    const hasDraft = Boolean(body?.hasDraft);
+    pluginState.clientDraft = { hasDraft, at: Date.now() };
+    report(`草稿上报：hasDraft=${hasDraft}`);
+    return Response.json({ ok: true }, { headers: JSON_HEADERS });
+  } catch (error) {
+    report(`草稿上报失败：${error instanceof Error ? error.message : String(error)}`);
+    return Response.json({ ok: false, error: error instanceof Error ? error.message : String(error) }, { status: 500, headers: JSON_HEADERS });
+  }
 }
 
 /** 自检口：不碰档案，只回答"配置与管道活着吗"。 */

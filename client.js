@@ -31,6 +31,9 @@ window.__ModuleLoader__.load({
     /** 两条路由（`/pending` 与 `/ack` 各注册一次，客户端这边各请求一次）。 */
     const ROUTE_PENDING = 'api/handoff/pending';
     const ROUTE_ACK = 'api/handoff/ack';
+    const ROUTE_DRAFT_REPORT = 'api/handoff/draft-report';
+    /** 草稿上报间隔：5 秒上报一次，够快也够省。 */
+    const DRAFT_REPORT_MS = 5_000;
     /** 超 2 小时的旧待接不追（修"错过窗口就永远不切"那个 bug 时一并加的）。 */
     const STALE_MS = 2 * 60 * 60 * 1_000;
     /**
@@ -53,6 +56,13 @@ window.__ModuleLoader__.load({
     let timer = null;
     /** 藏提示气泡的扫表（与轮询分开，因为要快一点）。 */
     let noticeTimer = null;
+    /**
+     * 草稿上报的表（5 秒一次）。
+     * 🔴 2026-10-03 修：原来这行写在 `apply` 的 try 里（`let draftTimer = setInterval(...)`），
+     *   而卸载回调在 try **外面** → 卸载时 `draftTimer` 根本不在作用域里 → 卸载一路抛错。
+     *   现在挪到这里，跟 timer/noticeTimer 并列，声明的位置和清理的位置是一个作用域了。
+     */
+    let draftTimer = null;
 
     /**
      * 把**自动交接包那条提示**从界面上藏掉（她 2026-09-27 16:5x：「能不能隐藏让我看不到」）。
@@ -179,6 +189,49 @@ window.__ModuleLoader__.load({
       } catch (error) {
         // 客户端这半边抛错的代价是"整块界面白掉"，所以这里必须兜住一切。
         warn('轮询出错（只记 Console）', error);
+      }
+    }
+
+    /**
+     * 输入框的 DOM 选择器（按"越靠前越准"排）。
+     *
+     * 🔴 2026-10-03 修：`inputActions.getDraft()` 这个方法**根本不存在**（InputActions 接口
+     *   里没有它），所以上面那版 hasDraft 永远是 false、草稿检测纯空转。改成直接读页面 DOM。
+     *   选择器是查出来的不是猜的，出处两条：
+     *   1. 本机装的 DSH 0.2.0-rc.2 · `dsh-client-ui-conversation/lib/client.js` 的
+     *      `ComposerContentEditable` 就是这么渲染输入框的：
+     *      `<div role="textbox" aria-multiline="true" data-composer-input="true">`，
+     *      `contentEditable` 只表示 `editor !== null && editable`（没挂编辑器时是 **false**），
+     *      所以**不能**按 contenteditable 找，只能认 `data-composer-input`。
+     *   2. 占位符是它的**兄弟**节点 `div[data-composer-placeholder]`（`aria-hidden`），
+     *      不在输入框里 —— 所以空草稿时 textContent 确实是 `''`，不会误判成有草稿。
+     *      后两条是老版本 DSH（textarea / contenteditable 手写输入框）的兜底。
+     */
+    const DRAFT_INPUT_SELECTORS = ['[data-composer-input]', 'textarea', '[contenteditable="true"]'];
+
+    /** 读输入框：只读 DOM，不建节点、不改任何东西；任一命中且 trim 后非空就算有草稿。 */
+    function readDraftFromDom() {
+      for (const selector of DRAFT_INPUT_SELECTORS) {
+        for (const node of document.querySelectorAll(selector)) {
+          const text = typeof node.value === 'string' ? node.value : node.textContent || '';
+          if (text.trim() !== '') return true;
+        }
+      }
+      return false;
+    }
+
+    /** 上报草稿状态到 Host。 */
+    async function reportDraft(ctx) {
+      try {
+        const hasDraft = readDraftFromDom();
+        // 上报到 Host
+        await fetch(ROUTE_DRAFT_REPORT, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ hasDraft }),
+        });
+      } catch (error) {
+        warn('上报草稿状态失败（只记 Console）', error);
       }
     }
 
@@ -314,13 +367,16 @@ window.__ModuleLoader__.load({
 
     return {
       // `uiWorkspace` 必须声明才拿得到；**只声明它**（塞进不存在的服务会让入口激活失败）。
-      inject: ['uiWorkspace'],
+      // 草稿上报需要 `sessions` 和 `uiSession`
+      inject: ['uiWorkspace', 'sessions', 'uiSession'],
       // 仅给 node --test 用；宿主/页面不消费。
       __test: { inputActionsOf, sendQuickWord, registerSwitchWord },
       apply(ctx) {
         try {
           log('已挂载：每 10 秒轮询一次 /api/handoff/pending（只做轮询 + 导航/归档）');
           timer = setInterval(() => { tick(ctx).catch(() => {}); }, POLL_MS);
+          // 草稿上报：每 5 秒检查并上报一次输入框草稿状态
+          draftTimer = setInterval(() => { reportDraft(ctx).catch(() => {}); }, DRAFT_REPORT_MS);
           // 顺手把那条又长又刷屏的自动交接包提示从界面上藏掉（她要求："让我看不到"）。
           hideHandoffNotice();
           noticeTimer = setInterval(hideHandoffNotice, NOTICE_SCAN_MS);
@@ -333,8 +389,10 @@ window.__ModuleLoader__.load({
           try {
             if (timer !== null) clearInterval(timer);
             if (noticeTimer !== null) clearInterval(noticeTimer);
+            if (draftTimer !== null) clearInterval(draftTimer);
             timer = null;
             noticeTimer = null;
+            draftTimer = null;
           } catch { /* 清理失败不该影响卸载 */ }
         };
       },

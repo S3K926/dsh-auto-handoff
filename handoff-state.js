@@ -22,6 +22,8 @@ export const pluginState = {
   lastRatio: null,
   lastDecision: '（还没算过）',
   lastTrigger: new Map(),
+  // 客户端草稿上报状态（键：hasDraft/at）
+  clientDraft: { hasDraft: false, at: 0 },
   // 演练关键词"待命"标记：`user/message` 事件里抓到关键词先记下，等下一次 pre-step 消费。
   // 为什么不在 pre-step 里直接读消息 —— 真机时序（2026-09-25 12:46 对着会话事件实测）：
   // turn/start → agent/inbox/spliced → step/start → **user/message**，
