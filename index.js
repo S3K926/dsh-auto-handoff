@@ -58,6 +58,13 @@ export const DEFAULTS = {
   // 「本轮运行失败」。先让它"只判定、不动作"地观察几轮，确认不再炸再开。
   // ⚠ 2026-09-27 16:3x：她要"自动切会话 + 无缝衔接"，patch 里已改成 true（真写 + 真切）。
   autoTrigger: false,
+  // 2026-10-03 加：写交接总结时改用这个模型（留空 = 跟会话用同一个）。
+  // 总结不需要会话里那个最强模型的推理能力，用便宜模型能省下一大截。
+  // 写法：`'模型名'`（沿用当前 provider）或 `'provider/模型名'`（连 provider 一起换）。
+  summaryModel: '',
+  // 2026-10-03 加：**即使认得出档案根也照旧跑一次模型总结**。
+  // 默认 false：有档案时跳过这次调用（内容已经在档案里，再总结一遍是重复开销）。
+  summarizeAlways: false,
   device: '【PC】',
   drillKeyword: '#交接演练',
   // 2026-09-27 16:3x 加的：**按需真交接**的关键词（打一次 = 立刻写真档案 + 切到新会话）。
@@ -96,6 +103,8 @@ export function resolveConfig(input = {}) {
     if (typeof merged[key] !== 'string') merged[key] = DEFAULTS[key];
   }
   if (typeof merged.summarize !== 'boolean') merged.summarize = DEFAULTS.summarize;
+  if (typeof merged.summarizeAlways !== 'boolean') merged.summarizeAlways = DEFAULTS.summarizeAlways;
+  if (typeof merged.summaryModel !== 'string') merged.summaryModel = DEFAULTS.summaryModel;
   return merged;
 }
 

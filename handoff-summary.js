@@ -36,7 +36,13 @@ export function fallbackAssistantMessage(text) {
   };
 }
 
-export function historyForSummary(session, maxChars = 24_000, maxMessages = 40) {
+/**
+ * ⚠ 2026-10-03 上限从 24_000 字 / 40 条收到 8_000 字 / 20 条：
+ *   五段式总结只需要"这轮在干嘛、挂着什么"，2.4 万字的输入换来的只是更长的重述，
+ *   而这段输入是一次实打实的模型调用（输入 token 按整个会话重放算）。实测够用。
+ *   想要更长的回顾：改这里的默认值即可（它是纯函数，改动不影响别的逻辑）。
+ */
+export function historyForSummary(session, maxChars = 8_000, maxMessages = 20) {
   const events = session?.snapshotEvents?.() ?? [];
   const flat = [];
   for (const event of events) {
@@ -119,8 +125,23 @@ export async function summarizeWithModel(ctx, session, config) {
   // 路由按官方口径取：优先 `requestHeader().config`（`dsh-compaction-basic` 就是这么拿的），
   // 退回 `requestContext()`（最新的 request/context 元数据）。
   const route = session?.requestHeader?.()?.config ?? session?.requestContext?.() ?? {};
-  const provider = route.provider;
-  const model = route.model;
+  // 2026-10-03 加：`config.summaryModel` 可以点名用**便宜的模型**来做这份总结。
+  //   写总结不需要会话里那个最强模型的推理能力，用同一个模型是最贵的选择。
+  //   两种写法都认：`'model-id'`（沿用当前 provider）或 `'provider/model-id'`（连 provider 一起换）。
+  //   留空 = 原行为（跟会话用同一个模型）。
+  let provider = route.provider;
+  let model = route.model;
+  const overrideModel = String(config?.summaryModel ?? '').trim();
+  if (overrideModel !== '') {
+    const slash = overrideModel.indexOf('/');
+    if (slash > 0) {
+      provider = overrideModel.slice(0, slash);
+      model = overrideModel.slice(slash + 1);
+    } else {
+      model = overrideModel;
+    }
+    report(`总结改用点名的模型：${provider}/${model}`);
+  }
   if (!provider || !model) throw new Error('拿不到当前会话的 provider/model');
   const messages = [...history, pluginUserMessage(HANDOFF_INSTRUCTION)];
 
@@ -140,7 +161,10 @@ export async function summarizeWithModel(ctx, session, config) {
     // 2026-09-27 21:2x 改（真机踩到）：原来 900 —— 思考型模型把预算全用在 reasoning 上，
     // 正文一个字没吐，兜底的 `text || reasoning` 就把**英文内心独白**当成总结发了出去
     // （21:19 那次交接包 3957 字全是思考）。2400 够装「思考＋五段正文」。
-    maxTokens: 2400,
+    // 2026-10-03 从 2400 收到 800：2400 是为"思考＋五段正文"一起留的，
+    // 而 `reasoningOffOption` 已经把思考关掉了（`thinking: {type:'disabled'}`），
+    // 五段正文通常几百字，800 足够，多余的额度只在失败时变成浪费。
+    maxTokens: 800,
     // 2026-09-27 22:4x 修根因（22:21 第 8 次踩到）：**关掉思考**（能力探测见 `reasoningOffOption`）。
     // 不传时 DeepSeek 适配器按部署默认走 high 档（thinking enabled，见 `dsh-llm-deepseek/lib`
     // 的 `resolveThinking`）→ 2400 预算先被 reasoning 吃光、正文一个字不出，兜底 `text || reasoning`
@@ -218,7 +242,18 @@ export async function refineHandoff(ctx, session, fallbackHandoff, root, config)
   const base = String(fallbackHandoff ?? '');
   try {
     let summarized = '';
-    if (config?.summarize === true) {
+    // ⚠ 2026-10-03 加：`root` 认得出（＝档案在那儿）时**跳过这次模型调用**。
+    //   理由：有档案的情况下，这一轮的日记／状态／生长记录已经写进档案了，
+    //   交接包本来就只是"指路 + 挂着的"（见下面 `if (root)` 那一支），
+    //   再让模型把整段会话读一遍写一份总结，是**重复开销**——总结费一次完整上下文调用，
+    //   而新会话真要细节是去读档案，不是读这段总结。
+    //   保留原行为的条件没动：**没有 root 时照旧自包含**（那时没别处能拿到上下文）。
+    //   想强制每次都总结：把 `&& !root` 去掉，或给 config 加 `summarizeAlways: true`。
+    const skipSummary = Boolean(root) && config?.summarizeAlways !== true;
+    if (skipSummary && config?.summarize === true) {
+      report('模型总结已跳过：档案根认得出，交接包走"指路 + 挂着的"，内容已在档案里');
+    }
+    if (config?.summarize === true && !skipSummary) {
       try {
         summarized = await summarizeWithModel(ctx, session, config);
         report(`模型总结完成（${summarized.length} 字）`);
