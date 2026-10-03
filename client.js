@@ -227,6 +227,98 @@ window.__ModuleLoader__.load({
       return false;
     }
 
+    /**
+     * 找输入框节点（按 DRAFT_INPUT_SELECTORS 顺序，命中即返回）。只读 DOM，找不到返回 null。
+     * `document` 不存在（离线测试沙箱）时返回 null —— 调用方据此跳过整条 DOM 路径。
+     */
+    function findDraftInput() {
+      try {
+        if (typeof document === 'undefined') return null;
+        for (const selector of DRAFT_INPUT_SELECTORS) {
+          const node = document.querySelector(selector);
+          if (node) return node;
+        }
+      } catch (error) {
+        warn('找输入框失败（当作没有）', error);
+      }
+      return null;
+    }
+
+    /** 安全版草稿检测：`document` 不存在 / 读 DOM 抛错都当"没有草稿"，绝不抛。 */
+    function domHasDraft() {
+      try {
+        if (typeof document === 'undefined') return false;
+        return readDraftFromDom();
+      } catch (error) {
+        warn('读输入框草稿失败（当作空）', error);
+        return false;
+      }
+    }
+
+    /**
+     * 真实 DOM 输入：`setDraft()` 之后 DOM 仍是空的时候走这里（实测"打字 + 回车"这条路有效）。
+     *   - `textarea` / `input`：用**原生 value setter** 写值（绕开受控组件的 setter 拦截），
+     *     再 `dispatchEvent(new Event('input',{bubbles:true}))`；
+     *   - 其余（DSH 0.2.0-rc.2 的 `[data-composer-input]` 那个 div）：`execCommand('insertText')`，
+     *     失败退回 `textContent` + `InputEvent('input')`。
+     * 全程只碰输入框那一个节点，不建节点、不注册 slot。返回是否真的动过 DOM。
+     */
+    function writeTextToDomInput(text) {
+      try {
+        const node = findDraftInput();
+        if (!node) return false;
+        if (typeof node.focus === 'function') node.focus();
+        const tag = node.tagName;
+        if (tag === 'TEXTAREA' || tag === 'INPUT') {
+          const proto = tag === 'TEXTAREA' ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+          const descriptor = Object.getOwnPropertyDescriptor(proto, 'value');
+          if (descriptor && descriptor.set) descriptor.set.call(node, text);
+          else node.value = text;
+          node.dispatchEvent(new Event('input', { bubbles: true }));
+          return true;
+        }
+        let inserted = false;
+        try {
+          inserted = typeof document.execCommand === 'function' && document.execCommand('insertText', false, text);
+        } catch {
+          inserted = false;
+        }
+        if (!inserted) {
+          node.textContent = text;
+          node.dispatchEvent(new InputEvent('input', { bubbles: true }));
+        }
+        return true;
+      } catch (error) {
+        warn('往输入框写字失败（继续试 submit）', error);
+        return false;
+      }
+    }
+
+    /** 真实 DOM 回退：对输入框派发 Enter 的 keydown/keyup（`submit()` 抛错或 DOM 仍空时用）。 */
+    function pressEnterOnDomInput() {
+      try {
+        const node = findDraftInput();
+        if (!node) return false;
+        if (typeof node.focus === 'function') node.focus();
+        for (const type of ['keydown', 'keyup']) {
+          const event = new KeyboardEvent(type, {
+            key: 'Enter',
+            code: 'Enter',
+            bubbles: true,
+            cancelable: true,
+          });
+          // `keyCode`/`which` 不是构造器参数，老编辑器只认它俩，所以用 defineProperty 补上。
+          try { Object.defineProperty(event, 'keyCode', { get: () => 13 }); } catch { /* 补不上就算了 */ }
+          try { Object.defineProperty(event, 'which', { get: () => 13 }); } catch { /* 补不上就算了 */ }
+          node.dispatchEvent(event);
+        }
+        return true;
+      } catch (error) {
+        warn('派发 Enter 失败', error);
+        return false;
+      }
+    }
+
     /** 上报草稿状态到 Host。 */
     async function reportDraft(ctx) {
       try {
@@ -338,14 +430,45 @@ window.__ModuleLoader__.load({
         .catch((error) => warn(`发送「${text}」失败`, error));
     }
 
-    /** 发一条词：写草稿 + 提交（提交走队列，正忙时会排队）。拿不到输入框就只留一行 warning。 */
+    /**
+     * 发一条词。**2026-10-03 修**：原来只 `setDraft` + `submit`，实测对话里收不到 `user/message`
+     * （宿主侧根本没有这条用户消息）→「AI 主动请求交接」和菜单里的「换会话」都发不出去。
+     * 现在照实测有效的"真实 DOM 输入"那条路补齐，顺序：
+     *   1. `setDraft(text)`（官方通道，**保留**）；
+     *   2. 读 DOM 确认输入框里真有文本（复用 `readDraftFromDom`）；
+     *   3. 没有 → 真实 DOM 输入（原生 value setter / `execCommand`）；
+     *   4. `submit()`（提交走队列，正忙时会排队）；
+     *   5. `submit()` 抛错、或做完 2/3 DOM 仍空 → 对输入框派发 Enter。
+     * 任何一步出错都只警告，**绝不抛**（客户端抛一次错＝整页白掉）。拿不到输入框仍只留一行 warning。
+     */
     function sendQuickWord(first, session, text) {
       const doSend = (actions) => {
+        // 1) 官方通道：先把草稿设进去（保留；新版 DSH 下可能不落到真实输入框）。
         try {
           actions.setDraft(text);
-          actions.submit();
         } catch (error) {
-          warn(`发送「${text}」失败`, error);
+          warn(`发送「${text}」失败（setDraft）`, error);
+        }
+
+        // 2) 读 DOM 确认草稿真的进了输入框；3) 没进去就走真实 DOM 输入。
+        let hasText = domHasDraft();
+        if (!hasText) {
+          writeTextToDomInput(text);
+          hasText = domHasDraft();
+        }
+
+        // 4) 官方提交。抛错则改走 Enter。
+        let submitted = false;
+        try {
+          actions.submit();
+          submitted = true;
+        } catch (error) {
+          warn(`发送「${text}」失败（submit）→ 改走 Enter`, error);
+        }
+
+        // 5) 提交失败、或做完 2/3 之后 DOM 仍是空 → 派发 Enter 兜底。
+        if (!submitted || !hasText) {
+          pressEnterOnDomInput();
         }
       };
       // 第一个参数是 ctx（带 .get）→ 走新 API；是 uiSession → 走老路（DSH 新版下老路会打警告）

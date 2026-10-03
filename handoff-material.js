@@ -97,7 +97,7 @@ export function buildHandoffInput(session) {
     pending: asked.length > 1 ? asked.slice(-3, -1).map((t) => oneLine(t, 100)) : [],
     touched: tools.length ? [tools.slice(0, 8).join('、')] : [],
     preferences: route ? [`沿用路由 ${route.provider}/${route.model}`] : [],
-    next: '按上面「挂着的」逐条收尾；先看 `生长\\状态.md` 顶部那一节。',
+    next: '只补账（补一条交接日记，序号接 `last_diary_seq` + 1；`last_updated` 刷实测值）；「挂着的」先判它**是不是已经做过**（看 `档案\\最新.zip` ／ `归档-旧版本与记录\\收工自检-*.txt` 的时间戳），做过就别重跑 —— 日记／备份／收工／整理各有各的词，她点哪个做哪个。先看 `生长\\状态.md` 顶部那一节。',
   };
 }
 
